@@ -39,7 +39,6 @@ conn.commit()
 
 # Function to calculate days pending
 def calculate_days_pending(added_date):
-    """Calculate the number of days since the task was added."""
     added_date = datetime.strptime(added_date, "%Y-%m-%d")
     current_date = datetime.now()
     days_pending = (current_date - added_date).days
@@ -51,7 +50,7 @@ def get_current_price(stock_symbol):
         ticker = yf.Ticker(stock_symbol + ".NS")  # NSE stocks require ".NS" suffix
         data = ticker.history(period="1d")
         return round(data['Close'][-1], 2)
-    except Exception as e:
+    except Exception:
         return None
 
 # Calculate booked profits for a client
@@ -143,7 +142,7 @@ if selected_section == "Portfolio Tracking":
     stock_filter = st.text_input("Filter by Stock Symbol (e.g., RELIANCE)")
     transaction_type_filter = st.selectbox("Filter by Transaction Type", ["All", "Buy", "Sell"])
 
-    # Display Transactions
+    # Add Transaction
     st.subheader("Add Transaction for Client")
     if selected_client != "All":
         stock_name = st.text_input("Stock Symbol (e.g., RELIANCE)")
@@ -158,6 +157,7 @@ if selected_section == "Portfolio Tracking":
             conn.commit()
             st.success(f"{transaction_type} entry added for {stock_name}!")
 
+    # Retrieve and Display Transactions
     transactions_query = "SELECT * FROM transactions"
     filters = []
 
@@ -175,19 +175,69 @@ if selected_section == "Portfolio Tracking":
     st.subheader("Filtered Transactions")
     st.dataframe(transactions)
 
-    # Current Profits for Each Stock
-    if selected_client != "All":
-        st.subheader("Current Profits (Unrealized)")
-        profit_df = calculate_current_profit(selected_client)
-        if not profit_df.empty:
-            st.dataframe(profit_df)
-        else:
-            st.write("No stocks held currently.")
+    # Update or Delete Transactions
+    st.subheader("Manage Transactions")
+    if not transactions.empty:
+        transaction_id = st.selectbox("Select Transaction ID to Update/Delete", transactions['transaction_id'].tolist())
+        selected_transaction = transactions[transactions['transaction_id'] == transaction_id]
 
-        # Booked Profits
-        st.subheader("Booked Profits")
-        profit = calculate_booked_profit(selected_client)
-        st.write(f"Total Booked Profit: ₹{profit}")
+        st.write("Selected Transaction Details:")
+        st.write(selected_transaction)
+
+        # Update Transaction
+        st.subheader("Update Transaction")
+        new_stock_name = st.text_input("Update Stock Name", value=selected_transaction.iloc[0]['stock_name'])
+        new_transaction_type = st.radio(
+            "Update Transaction Type",
+            ["Buy", "Sell"],
+            index=["Buy", "Sell"].index(selected_transaction.iloc[0]['transaction_type'])
+        )
+        new_quantity = st.number_input(
+            "Update Quantity",
+            min_value=1,
+            value=int(selected_transaction.iloc[0]['quantity'])
+        )
+        new_price = st.number_input(
+            "Update Price per Unit",
+            min_value=0.0,
+            value=float(selected_transaction.iloc[0]['price'])
+        )
+        new_date = st.date_input(
+            "Update Transaction Date",
+            value=pd.to_datetime(selected_transaction.iloc[0]['date']).date()
+        )
+
+        if st.button("Save Updates"):
+            c.execute('''
+                UPDATE transactions
+                SET stock_name = ?, transaction_type = ?, quantity = ?, price = ?, date = ?
+                WHERE transaction_id = ?
+            ''', (new_stock_name, new_transaction_type, new_quantity, new_price, new_date, transaction_id))
+            conn.commit()
+            st.success("Transaction updated successfully!")
+
+        # Delete Transaction
+        st.subheader("Delete Transaction")
+        if st.button("Delete Transaction"):
+            c.execute('DELETE FROM transactions WHERE transaction_id = ?', (transaction_id,))
+            conn.commit()
+            st.warning("Transaction deleted successfully!")
+    else:
+        st.write("No transactions available for management.")
+
+    # Unrealized Profits
+    st.subheader("Current Profits (Unrealized)")
+    profit_df = calculate_current_profit(selected_client)
+    if not profit_df.empty:
+        st.dataframe(profit_df)
+    else:
+        st.write("No stocks held currently.")
+
+    # Booked Profits
+    st.subheader("Booked Profits")
+    profit = calculate_booked_profit(selected_client)
+    st.write(f"Total Booked Profit: ₹{profit}")
+
 
 # Work Tracking Section
 if selected_section == "Work Tracking":
