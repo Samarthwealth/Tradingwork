@@ -81,12 +81,16 @@ def calculate_current_profit(client_name):
     for stock in transactions['stock_name'].unique():
         stock_transactions = transactions[transactions['stock_name'] == stock]
 
-        # Filter only "Buy" transactions to calculate average buy price
-        buy_transactions = stock_transactions[stock_transactions['transaction_type'] == 'Buy']
-        total_quantity = buy_transactions['quantity'].sum()
+        # Calculate total quantity held considering "Buy" and "Sell" transactions
+        total_quantity = stock_transactions[stock_transactions['transaction_type'] == 'Buy']['quantity'].sum() - \
+                         stock_transactions[stock_transactions['transaction_type'] == 'Sell']['quantity'].sum()
 
         if total_quantity > 0:
-            avg_buy_price = (buy_transactions['quantity'] * buy_transactions['price']).sum() / total_quantity
+            avg_buy_price = (
+                stock_transactions[stock_transactions['transaction_type'] == 'Buy']['quantity'] *
+                stock_transactions[stock_transactions['transaction_type'] == 'Buy']['price']
+            ).sum() / total_quantity
+
             total_quantity_held = total_quantity
 
             # Fetch current market price using yfinance
