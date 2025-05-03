@@ -7,7 +7,7 @@ import sqlite3
 conn = sqlite3.connect('portfolio.db')
 c = conn.cursor()
 
-# Create tables for storing client and transaction data
+# Create tables
 c.execute('''CREATE TABLE IF NOT EXISTS clients (
                 client_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_name TEXT UNIQUE)''')
@@ -23,32 +23,22 @@ c.execute('''CREATE TABLE IF NOT EXISTS transactions (
 
 conn.commit()
 
-# Fetch current stock price using yfinance
+# Function to fetch current stock price
 def get_current_price(stock_symbol):
     try:
-        ticker = yf.Ticker(stock_symbol + ".NS")  # NSE stocks require ".NS" suffix
+        ticker = yf.Ticker(stock_symbol + ".NS")
         data = ticker.history(period="1d")
         return round(data['Close'][-1], 2)
     except Exception:
         return None
 
-# Calculate deployed amount for a client
-def calculate_deployed_amount(client_name):
+# Function to calculate realized profit/loss
+def calculate_realized_profit(client_name):
     transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{client_name}'", conn)
     if transactions.empty:
         return 0
 
-    buy_transactions = transactions[transactions['transaction_type'] == 'Buy']
-    deployed_amount = (buy_transactions['quantity'] * buy_transactions['price']).sum()
-    return deployed_amount
-
-# Calculate booked profits for a client
-def calculate_booked_profit(client_name):
-    transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{client_name}'", conn)
-    if transactions.empty:
-        return 0
-
-    total_profit = 0
+    total_realized_profit = 0
     for _, row in transactions.iterrows():
         if row['transaction_type'] == 'Sell':
             buy_transactions = transactions[
@@ -57,11 +47,12 @@ def calculate_booked_profit(client_name):
             ]
             if not buy_transactions.empty:
                 avg_buy_price = buy_transactions['price'].mean()
-                total_profit += (row['price'] - avg_buy_price) * row['quantity']
-    return total_profit
+                total_realized_profit += (row['price'] - avg_buy_price) * row['quantity']
 
-# Calculate current profits (unrealized) for each stock
-def calculate_current_profit(client_name):
+    return round(total_realized_profit, 2)
+
+# Function to calculate unrealized profit/loss
+def calculate_unrealized_profit(client_name):
     transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{client_name}'", conn)
     if transactions.empty:
         return pd.DataFrame()
@@ -69,25 +60,21 @@ def calculate_current_profit(client_name):
     profit_data = []
     for stock in transactions['stock_name'].unique():
         stock_transactions = transactions[transactions['stock_name'] == stock]
-
-        # Filter only "Buy" transactions to calculate average buy price
         buy_transactions = stock_transactions[stock_transactions['transaction_type'] == 'Buy']
         total_quantity = buy_transactions['quantity'].sum()
 
         if total_quantity > 0:
             avg_buy_price = (buy_transactions['quantity'] * buy_transactions['price']).sum() / total_quantity
-            total_quantity_held = total_quantity
-
-            # Fetch current market price using yfinance
             current_price = get_current_price(stock)
+
             if current_price is not None:
-                unrealized_profit = (current_price - avg_buy_price) * total_quantity_held
+                unrealized_profit = (current_price - avg_buy_price) * total_quantity
                 profit_data.append({
                     "Stock Name": stock,
                     "Average Buy Price": round(avg_buy_price, 2),
                     "Current Market Price": round(current_price, 2),
-                    "Quantity Held": total_quantity_held,
-                    "Unrealized Profit": round(unrealized_profit, 2)
+                    "Quantity Held": total_quantity,
+                    "Unrealized Profit/Loss": round(unrealized_profit, 2)
                 })
 
     return pd.DataFrame(profit_data)
@@ -111,6 +98,26 @@ clients = pd.read_sql("SELECT client_name FROM clients", conn)['client_name'].to
 selected_client = st.selectbox("Select Client", clients)
 
 if selected_client:
+    # Update Client Name
+    st.sidebar.header("Update Client Name")
+    new_client_name = st.sidebar.text_input("New Client Name")
+    if st.sidebar.button("Update Client"):
+        try:
+            c.execute(f"UPDATE clients SET client_name = '{new_client_name}' WHERE client_name = '{selected_client}'")
+            c.execute(f"UPDATE transactions SET client_name = '{new_client_name}' WHERE client_name = '{selected_client}'")
+            conn.commit()
+            st.sidebar.success(f"Client name updated from '{selected_client}' to '{new_client_name}'!")
+        except sqlite3.IntegrityError:
+            st.sidebar.error(f"Client '{new_client_name}' already exists!")
+
+    # Delete Client
+    st.sidebar.header("Delete Client")
+    if st.sidebar.button("Delete Client"):
+        c.execute(f"DELETE FROM clients WHERE client_name = '{selected_client}'")
+        c.execute(f"DELETE FROM transactions WHERE client_name = '{selected_client}'")
+        conn.commit()
+        st.sidebar.success(f"Client '{selected_client}' has been deleted!")
+
     # Add Transaction
     st.header(f"Add Transaction for {selected_client}")
     stock_name = st.text_input("Stock Symbol (e.g., RELIANCE)")
@@ -125,33 +132,44 @@ if selected_client:
         conn.commit()
         st.success(f"{transaction_type} entry added for {stock_name}!")
 
-    # Portfolio Overview
-    st.header(f"Portfolio Overview for {selected_client}")
-
-    # Display the transaction table
+    # Transaction History
     transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{selected_client}'", conn)
     st.subheader("Transaction History")
     st.dataframe(transactions)
 
-    # Summary Insights
+    # Update Transaction
+    st.subheader("Update Transaction")
+    if not transactions.empty:
+        selected_transaction_id = st.selectbox("Select Transaction ID", transactions["transaction_id"].tolist())
+        new_price = st.number_input("New Price per Unit", min_value=0.0)
+        new_quantity = st.number_input("New Quantity", min_value=1)
+
+        if st.button("Update Transaction"):
+            c.execute(f"UPDATE transactions SET price = {new_price}, quantity = {new_quantity} WHERE transaction_id = {selected_transaction_id}")
+            conn.commit()
+            st.success(f"Transaction ID {selected_transaction_id} updated!")
+
+    # Delete Transaction
+    st.subheader("Delete Transaction")
+    if not transactions.empty:
+        selected_transaction_id_delete = st.selectbox("Select Transaction ID to Delete", transactions["transaction_id"].tolist())
+
+        if st.button("Delete Transaction"):
+            c.execute(f"DELETE FROM transactions WHERE transaction_id = {selected_transaction_id_delete}")
+            conn.commit()
+            st.success(f"Transaction ID {selected_transaction_id_delete} deleted!")
+
+    # Portfolio Insights
     st.subheader("Portfolio Insights")
-    deployed_amount = calculate_deployed_amount(selected_client)
-    unrealized_profit = calculate_current_profit(selected_client)['Unrealized Profit'].sum() if not calculate_current_profit(selected_client).empty else 0
-    remaining_amount = deployed_amount + unrealized_profit
 
-    st.write(f"**Deployed Amount:** ₹{deployed_amount:,.2f}")
-    st.write(f"**Unrealized Profit/Loss:** ₹{unrealized_profit:,.2f}")
-    st.write(f"**Amount Remaining:** ₹{remaining_amount:,.2f}")
+    # Realized Profit/Loss
+    realized_profit = calculate_realized_profit(selected_client)
+    st.write(f"**Realized Profit/Loss:** ₹{realized_profit:,.2f}")
 
-    # Booked Profits
-    st.subheader("Booked Profits")
-    profit = calculate_booked_profit(selected_client)
-    st.write(f"Total Booked Profit: ₹{profit}")
-
-    # Current Profits for Each Stock
-    st.subheader("Current Profits (Unrealized)")
-    profit_df = calculate_current_profit(selected_client)
-    if not profit_df.empty:
-        st.dataframe(profit_df)
+    # Unrealized Profit/Loss
+    unrealized_profit_df = calculate_unrealized_profit(selected_client)
+    if not unrealized_profit_df.empty:
+        st.subheader("Unrealized Profit/Loss")
+        st.dataframe(unrealized_profit_df)
     else:
         st.write("No stocks held currently.")
