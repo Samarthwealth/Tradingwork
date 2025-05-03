@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import sqlite3
-from datetime import datetime
 
 # Connect to SQLite database
 conn = sqlite3.connect('portfolio.db')
 c = conn.cursor()
 
-# Create tables for storing client, transaction, employee, and task data
+# Create tables for storing client and transaction data
 c.execute('''CREATE TABLE IF NOT EXISTS clients (
                 client_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_name TEXT UNIQUE)''')
@@ -22,27 +21,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS transactions (
                 price REAL,
                 date TEXT)''')
 
-c.execute('''CREATE TABLE IF NOT EXISTS employees (
-                employee_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                employee_name TEXT UNIQUE)''')
-
-c.execute('''CREATE TABLE IF NOT EXISTS tasks (
-                task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_name TEXT,
-                description TEXT,
-                assigned_to TEXT,
-                added_date TEXT,
-                deadline TEXT,
-                status TEXT)''')
-
 conn.commit()
-
-# Function to calculate days pending
-def calculate_days_pending(added_date):
-    added_date = datetime.strptime(added_date, "%Y-%m-%d")
-    current_date = datetime.now()
-    days_pending = (current_date - added_date).days
-    return days_pending
 
 # Fetch current stock price using yfinance
 def get_current_price(stock_symbol):
@@ -52,6 +31,16 @@ def get_current_price(stock_symbol):
         return round(data['Close'][-1], 2)
     except Exception:
         return None
+
+# Calculate deployed amount for a client
+def calculate_deployed_amount(client_name):
+    transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{client_name}'", conn)
+    if transactions.empty:
+        return 0
+
+    buy_transactions = transactions[transactions['transaction_type'] == 'Buy']
+    deployed_amount = (buy_transactions['quantity'] * buy_transactions['price']).sum()
+    return deployed_amount
 
 # Calculate booked profits for a client
 def calculate_booked_profit(client_name):
@@ -81,16 +70,12 @@ def calculate_current_profit(client_name):
     for stock in transactions['stock_name'].unique():
         stock_transactions = transactions[transactions['stock_name'] == stock]
 
-        # Calculate total quantity held considering "Buy" and "Sell" transactions
-        total_quantity = stock_transactions[stock_transactions['transaction_type'] == 'Buy']['quantity'].sum() - \
-                         stock_transactions[stock_transactions['transaction_type'] == 'Sell']['quantity'].sum()
+        # Filter only "Buy" transactions to calculate average buy price
+        buy_transactions = stock_transactions[stock_transactions['transaction_type'] == 'Buy']
+        total_quantity = buy_transactions['quantity'].sum()
 
         if total_quantity > 0:
-            avg_buy_price = (
-                stock_transactions[stock_transactions['transaction_type'] == 'Buy']['quantity'] *
-                stock_transactions[stock_transactions['transaction_type'] == 'Buy']['price']
-            ).sum() / total_quantity
-
+            avg_buy_price = (buy_transactions['quantity'] * buy_transactions['price']).sum() / total_quantity
             total_quantity_held = total_quantity
 
             # Fetch current market price using yfinance
@@ -108,13 +93,11 @@ def calculate_current_profit(client_name):
     return pd.DataFrame(profit_data)
 
 # Streamlit App
-st.title("Portfolio and Work Tracking App")
+st.title("Stock Portfolio Tracking App")
 
-# Sidebar for adding new clients and employees
-st.sidebar.header("Add New Client / Employee")
+# Add New Client
+st.sidebar.header("Add New Client")
 client_name = st.sidebar.text_input("Client Name")
-employee_name = st.sidebar.text_input("Employee Name")
-
 if st.sidebar.button("Add Client"):
     try:
         c.execute(f"INSERT INTO clients (client_name) VALUES ('{client_name}')")
@@ -123,168 +106,52 @@ if st.sidebar.button("Add Client"):
     except sqlite3.IntegrityError:
         st.sidebar.error(f"Client '{client_name}' already exists!")
 
-if st.sidebar.button("Add Employee"):
-    try:
-        c.execute(f"INSERT INTO employees (employee_name) VALUES ('{employee_name}')")
-        conn.commit()
-        st.sidebar.success(f"Employee '{employee_name}' added!")
-    except sqlite3.IntegrityError:
-        st.sidebar.error(f"Employee '{employee_name}' already exists!")
+# Select Client
+clients = pd.read_sql("SELECT client_name FROM clients", conn)['client_name'].tolist()
+selected_client = st.selectbox("Select Client", clients)
 
-# Main Section
-selected_section = st.selectbox("Choose a Section", ["Portfolio Tracking", "Work Tracking"])
-
-# Portfolio Tracking Section
-if selected_section == "Portfolio Tracking":
-    st.header("Portfolio Tracking")
-
-    # Select Client
-    clients = pd.read_sql("SELECT client_name FROM clients", conn)['client_name'].tolist()
-    selected_client = st.selectbox("Select Client", ["All"] + clients)
-
-    # Filters for transactions
-    stock_filter = st.text_input("Filter by Stock Symbol (e.g., RELIANCE)")
-    transaction_type_filter = st.selectbox("Filter by Transaction Type", ["All", "Buy", "Sell"])
-
+if selected_client:
     # Add Transaction
-    st.subheader("Add Transaction for Client")
-    if selected_client != "All":
-        stock_name = st.text_input("Stock Symbol (e.g., RELIANCE)")
-        transaction_type = st.radio("Transaction Type", ["Buy", "Sell"])
-        quantity = st.number_input("Quantity", min_value=1)
-        price = st.number_input("Price per Unit", min_value=0.0)
-        date = st.date_input("Transaction Date")
-        if st.button("Add Transaction"):
-            c.execute('''INSERT INTO transactions (client_name, stock_name, transaction_type, quantity, price, date)
-                         VALUES (?, ?, ?, ?, ?, ?)''',
-                      (selected_client, stock_name, transaction_type, quantity, price, date))
-            conn.commit()
-            st.success(f"{transaction_type} entry added for {stock_name}!")
+    st.header(f"Add Transaction for {selected_client}")
+    stock_name = st.text_input("Stock Symbol (e.g., RELIANCE)")
+    transaction_type = st.radio("Transaction Type", ["Buy", "Sell"])
+    quantity = st.number_input("Quantity", min_value=1)
+    price = st.number_input("Price per Unit", min_value=0.0)
+    date = st.date_input("Transaction Date")
+    if st.button("Add Transaction"):
+        c.execute('''INSERT INTO transactions (client_name, stock_name, transaction_type, quantity, price, date)
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                  (selected_client, stock_name, transaction_type, quantity, price, date))
+        conn.commit()
+        st.success(f"{transaction_type} entry added for {stock_name}!")
 
-    # Retrieve and Display Transactions
-    transactions_query = "SELECT * FROM transactions"
-    filters = []
+    # Portfolio Overview
+    st.header(f"Portfolio Overview for {selected_client}")
 
-    if selected_client != "All":
-        filters.append(f"client_name = '{selected_client}'")
-    if stock_filter:
-        filters.append(f"stock_name LIKE '%{stock_filter}%'")
-    if transaction_type_filter != "All":
-        filters.append(f"transaction_type = '{transaction_type_filter}'")
-
-    if filters:
-        transactions_query += " WHERE " + " AND ".join(filters)
-
-    transactions = pd.read_sql(transactions_query, conn)
-    st.subheader("Filtered Transactions")
+    # Display the transaction table
+    transactions = pd.read_sql(f"SELECT * FROM transactions WHERE client_name = '{selected_client}'", conn)
+    st.subheader("Transaction History")
     st.dataframe(transactions)
 
-    # Update or Delete Transactions
-    st.subheader("Manage Transactions")
-    if not transactions.empty:
-        transaction_id = st.selectbox("Select Transaction ID to Update/Delete", transactions['transaction_id'].tolist())
-        selected_transaction = transactions[transactions['transaction_id'] == transaction_id]
+    # Summary Insights
+    st.subheader("Portfolio Insights")
+    deployed_amount = calculate_deployed_amount(selected_client)
+    unrealized_profit = calculate_current_profit(selected_client)['Unrealized Profit'].sum() if not calculate_current_profit(selected_client).empty else 0
+    remaining_amount = deployed_amount + unrealized_profit
 
-        st.write("Selected Transaction Details:")
-        st.write(selected_transaction)
-
-        # Update Transaction
-        st.subheader("Update Transaction")
-        new_stock_name = st.text_input("Update Stock Name", value=selected_transaction.iloc[0]['stock_name'])
-        new_transaction_type = st.radio(
-            "Update Transaction Type",
-            ["Buy", "Sell"],
-            index=["Buy", "Sell"].index(selected_transaction.iloc[0]['transaction_type'])
-        )
-        new_quantity = st.number_input(
-            "Update Quantity",
-            min_value=1,
-            value=int(selected_transaction.iloc[0]['quantity'])
-        )
-        new_price = st.number_input(
-            "Update Price per Unit",
-            min_value=0.0,
-            value=float(selected_transaction.iloc[0]['price'])
-        )
-        new_date = st.date_input(
-            "Update Transaction Date",
-            value=pd.to_datetime(selected_transaction.iloc[0]['date']).date()
-        )
-
-        if st.button("Save Updates"):
-            c.execute('''
-                UPDATE transactions
-                SET stock_name = ?, transaction_type = ?, quantity = ?, price = ?, date = ?
-                WHERE transaction_id = ?
-            ''', (new_stock_name, new_transaction_type, new_quantity, new_price, new_date, transaction_id))
-            conn.commit()
-            st.success("Transaction updated successfully!")
-
-        # Delete Transaction
-        st.subheader("Delete Transaction")
-        if st.button("Delete Transaction"):
-            c.execute('DELETE FROM transactions WHERE transaction_id = ?', (transaction_id,))
-            conn.commit()
-            st.warning("Transaction deleted successfully!")
-    else:
-        st.write("No transactions available for management.")
-
-    # Unrealized Profits
-    st.subheader("Current Profits (Unrealized)")
-    profit_df = calculate_current_profit(selected_client)
-    if not profit_df.empty:
-        st.dataframe(profit_df)
-    else:
-        st.write("No stocks held currently.")
+    st.write(f"**Deployed Amount:** ₹{deployed_amount:,.2f}")
+    st.write(f"**Unrealized Profit/Loss:** ₹{unrealized_profit:,.2f}")
+    st.write(f"**Amount Remaining:** ₹{remaining_amount:,.2f}")
 
     # Booked Profits
     st.subheader("Booked Profits")
     profit = calculate_booked_profit(selected_client)
     st.write(f"Total Booked Profit: ₹{profit}")
 
-
-# Work Tracking Section
-if selected_section == "Work Tracking":
-    st.header("Work Tracking")
-
-    # Filters for tasks
-    employee_filter = st.selectbox("Filter by Assigned Employee", ["All"] + pd.read_sql("SELECT employee_name FROM employees", conn)['employee_name'].tolist())
-    status_filter = st.selectbox("Filter by Task Status", ["All", "Pending", "In Progress", "Completed"])
-
-    tasks_query = "SELECT * FROM tasks"
-    task_filters = []
-
-    if employee_filter != "All":
-        task_filters.append(f"assigned_to = '{employee_filter}'")
-    if status_filter != "All":
-        task_filters.append(f"status = '{status_filter}'")
-
-    if task_filters:
-        tasks_query += " WHERE " + " AND ".join(task_filters)
-
-    tasks = pd.read_sql(tasks_query, conn)
-    if not tasks.empty:
-        # Calculate "Days Pending" for each task
-        tasks['Days Pending'] = tasks['added_date'].apply(calculate_days_pending)
-        st.subheader("Filtered Tasks")
-        st.dataframe(tasks)
-
-        # Manage Tasks
-        task_id = st.selectbox("Select Task ID", tasks['task_id'].tolist())
-        selected_task = tasks[tasks['task_id'] == task_id]
-        st.write(selected_task)
-
-        # Update Task Status
-        updated_status = st.selectbox("Update Status", ["Pending", "In Progress", "Completed"])
-        if st.button("Update Task Status"):
-            c.execute('UPDATE tasks SET status = ? WHERE task_id = ?', (updated_status, task_id))
-            conn.commit()
-            st.success("Task status updated successfully!")
-
-        # Delete Task
-        if st.button("Delete Task"):
-            c.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
-            conn.commit()
-            st.warning("Task deleted successfully!")
+    # Current Profits for Each Stock
+    st.subheader("Current Profits (Unrealized)")
+    profit_df = calculate_current_profit(selected_client)
+    if not profit_df.empty:
+        st.dataframe(profit_df)
     else:
-        st.write("No tasks found.")
+        st.write("No stocks held currently.")
